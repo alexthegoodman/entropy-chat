@@ -191,6 +191,8 @@ button {
   border-radius: 5px;
   width: 250px;
   margin: 0 auto;
+  display: block;
+  width: 80%;
 }
 
 .more {
@@ -243,6 +245,11 @@ button {
 
 .chat-messages {
   min-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex-flow: column-reverse;
+  padding-bottom: 30px;
 }
 
 .chat-message {
