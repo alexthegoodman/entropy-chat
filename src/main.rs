@@ -8,6 +8,8 @@ pub mod app;
 pub mod components;
 
 fn main() {
+    console_error_panic_hook::set_once();
+
     // Find the container element by its ID
     let container = web_sys::window()
         .unwrap()
