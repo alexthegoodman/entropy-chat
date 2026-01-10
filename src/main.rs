@@ -1,9 +1,11 @@
 use leptos::prelude::*;
 use leptos::wasm_bindgen::JsCast;
 
-use crate::test::App;
-
-pub mod test;
+// use crate::test::App;
+// pub mod test;
+use crate::app::App;
+pub mod app;
+pub mod components;
 
 fn main() {
     // Find the container element by its ID
