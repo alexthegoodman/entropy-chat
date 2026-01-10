@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 leptos = { version = "0.8.15", features = ["csr"] }
+web-sys = { version = "0.3", features = ["Window", "Navigator"] }
