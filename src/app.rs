@@ -27,8 +27,20 @@ use gloo_net::http::Request;
 
 use crate::components::component_browser::ComponentPropertiesEditor;
 
+fn get_api_url() -> String {
+    let window = web_sys::window().unwrap();
+    let location = window.location();
+    let hostname = location.hostname().unwrap_or_default();
+
+    if hostname == "localhost" || hostname == "127.0.0.1" {
+        "http://localhost:3000".to_string()
+    } else {
+        "https://entropy-site.vercel.app".to_string()
+    }
+}
+
 async fn save_project(project_id: &str, saved_state: &SavedState) -> Result<(), String> {
-    let url = format!("/api/projects/{}", project_id);
+    let url = format!("{}/api/projects/{}", get_api_url(), project_id);
     let body = serde_json::json!({ "savedData": saved_state });
     
     Request::patch(&url)
@@ -552,7 +564,7 @@ pub fn App() -> impl IntoView {
             if refetch_projects.get() {
                 set_refetch_projects.update_untracked(|val| *val = false);
             }
-            Request::get("/api/projects")
+            Request::get(&format!("{}/api/projects", get_api_url()))
                 .send()
                 .await
                 .map_err(|e| e.to_string())?
@@ -576,7 +588,7 @@ pub fn App() -> impl IntoView {
             }
             let session_id = current_session.get().map(|s| s.id);
             if let Some(session_id) = session_id {
-                let url = format!("/api/sessions/{}/messages", session_id);
+                let url = format!("{}/api/sessions/{}/messages", get_api_url(), session_id);
                 let mut remote: Vec<ChatMessage> = Request::get(&url)
                     .send()
                     .await
@@ -588,7 +600,8 @@ pub fn App() -> impl IntoView {
                 // Combine with local messages here
                 remote.extend(local_messages.get_untracked().iter().cloned());
                 Ok(remote)
-            } else {
+            }
+            else {
                 Ok(local_messages.get_untracked())
             }
         },
@@ -597,7 +610,7 @@ pub fn App() -> impl IntoView {
     let open_project_chat = move |project_info: ProjectInfo| {
         spawn_local(async move {
             // 1. Fetch full project details (including savedData)
-            let project_res = Request::get(&format!("/api/projects/{}", project_info.id))
+            let project_res = Request::get(&format!("{}/api/projects/{}", get_api_url(), project_info.id))
                 .send()
                 .await;
             
@@ -611,7 +624,7 @@ pub fn App() -> impl IntoView {
                     // Let's create a new one for simplicity as per requirements "Start New Project" or "Chat with...".
                     // The old code returned `session` from `open_project_chat`.
                     
-                    let session_res = Request::post("/api/sessions")
+                    let session_res = Request::post(&format!("{}/api/sessions", get_api_url()))
                         .json(&serde_json::json!({ "projectId": project.id }))
                         .expect("Couldn't get json")
                         .send()
@@ -682,7 +695,7 @@ pub fn App() -> impl IntoView {
                     input.set_value("");
                 }
 
-                let url = format!("/api/sessions/{}/messages", session_id);
+                let url = format!("{}/api/sessions/{}/messages", get_api_url(), session_id);
                 let response = Request::post(&url)
                     .json(&body)
                     .expect("Couldn't get json")
