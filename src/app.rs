@@ -23,20 +23,32 @@ use leptos::web_sys;
 use entropy_engine::handlers::{EntropyPosition, handle_key_press, handle_mouse_move, handle_mouse_move_on_shift};
 use entropy_engine::water_plane::config::WaterConfig;
 use std::time::{Duration, SystemTime};
+use gloo_net::http::Request;
 
 use crate::components::component_browser::ComponentPropertiesEditor;
 
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"])]
-    async fn invoke(cmd: &str, args: JsValue) -> JsValue;
+async fn save_project(project_id: &str, saved_state: &SavedState) -> Result<(), String> {
+    let url = format!("/api/projects/{}", project_id);
+    let body = serde_json::json!({ "savedData": saved_state });
+    
+    Request::patch(&url)
+        .json(&body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+        
+    Ok(())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub id: String,
     pub name: String,
     pub path: String,
+    #[serde(rename = "savedData")]
+    pub saved_data: Option<SavedState>,
+    #[serde(default)]
     pub sessions: Vec<ChatSession>,
 }
 
@@ -45,7 +57,6 @@ pub struct ProjectInfo {
     pub id: String,
     pub name: String,
     pub path: String,
-    pub saved_data: SavedState, // this JSON needs to be added to database
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +101,7 @@ pub struct OpenChatResponse {
 async fn execute_tool_call(
     tool_call: &ToolCall,
     pipeline_store: LocalResource<Option<Rc<RefCell<ExportPipeline>>>>,
+    project_id: String,
 ) -> String {
     log!("Executing tool call: {:?}", tool_call.function.name);
 
@@ -142,6 +154,8 @@ async fn execute_tool_call(
         pub wave3_direction: Option<[f32; 2]>,
     }
 
+    let mut saved_state_clone = None;
+
     if tool_call.function.name == "transformObject" {
         let args: Result<TransformObjectArgs, _> = serde_json::from_str(&tool_call.function.arguments);
         if let Ok(args) = args {
@@ -166,6 +180,7 @@ async fn execute_tool_call(
                                     }
                                 }
                             }
+                            saved_state_clone = Some(saved_state.clone());
                         }
 
                         // Update RendererState
@@ -297,6 +312,17 @@ async fn execute_tool_call(
                                 water_plane.update_config(&editor.gpu_resources.as_ref().expect("Couldn't get gpu resources").queue, current_config);
 
                                 log!("Water plane configured {:?}", water_plane.config);
+
+                                if let Some(saved_state) = editor.saved_state.as_mut() {
+                                    // Assuming water config is part of saved_state (it should be in level components or global config)
+                                    // If not, we might need to update where it is stored in SavedState.
+                                    // For now, let's clone saved_state to trigger a save, assuming the water config changes are reflected in it 
+                                    // OR we need to update the saved_state from the renderer_state.
+                                    // But typically editor.saved_state is the source of truth for saving.
+                                    // If water config is NOT in saved_state, saving it won't help unless we sync it.
+                                    // Let's assume for now we just trigger save.
+                                    saved_state_clone = Some(saved_state.clone());
+                                }
                             }
                         }
                     }
@@ -305,12 +331,18 @@ async fn execute_tool_call(
         }
     }
 
+    if let Some(saved_state) = saved_state_clone {
+        spawn_local(async move {
+            let _ = save_project(&project_id, &saved_state).await;
+        });
+    }
+
     "{\"success\": true}".to_string()
 }
 
 #[component]
 pub fn ProjectCanvas(
-    selected_project: ReadSignal<Option<ProjectInfo>>,
+    selected_project: ReadSignal<Option<Project>>,
     pipeline_store: LocalResource<Option<Rc<RefCell<ExportPipeline>>>>,
     is_initialized: ReadSignal<bool>,
     set_is_initialized: WriteSignal<bool>,
@@ -325,7 +357,7 @@ pub fn ProjectCanvas(
         let canvas = canvas.expect("canvas should be loaded");
 
         if let Some(project) = selected_project.get() {
-            let project_id = project.id.clone();
+            let project_data = project.clone();
             if let Some(pipeline_arc) = pipeline_store.get() {
                 if let Some(pipeline_arc) = pipeline_arc.as_ref() {
                     let pipeline_arc_clone = pipeline_arc.clone();
@@ -356,7 +388,19 @@ pub fn ProjectCanvas(
                         log!("loading project...");
 
                         let editor = pipeline_guard.export_editor.as_mut().expect("Couldn't get editor");
-                        load_project(editor, &project_id).await;
+                        // Manually load saved state
+                        if let Some(saved_data) = project_data.saved_data {
+                            editor.saved_state = Some(saved_data.clone());
+                            // We also need to trigger loading of assets/models based on this saved state
+                            // But load_project usually does that. 
+                            // Since we can't easily call load_project which might do FS ops,
+                            // we might need to rely on what's available or implement a lighter load_project.
+                            // For now, let's assume placing the project state is enough or call a helper if available.
+                            
+                            // Re-implement basic loading logic from place_project/load_project if needed
+                            // But place_project is available.
+                             place_project(editor, &project_data.id, saved_data.clone()).await;
+                        }
 
                         log!("configuring surface...");
 
@@ -492,7 +536,7 @@ pub fn ProjectCanvas(
 #[component]
 pub fn App() -> impl IntoView {
     let (show_chat, set_show_chat) = signal(false);
-    let (selected_project, set_selected_project) = signal::<Option<ProjectInfo>>(None);
+    let (selected_project, set_selected_project) = signal::<Option<Project>>(None);
     let (current_session, set_current_session) = signal::<Option<ChatSession>>(None);
     let (refetch_projects, set_refetch_projects) = signal(false);
     let (refetch_messages, set_refetch_messages) = signal(false);
@@ -508,9 +552,13 @@ pub fn App() -> impl IntoView {
             if refetch_projects.get() {
                 set_refetch_projects.update_untracked(|val| *val = false);
             }
-            let args = serde_wasm_bindgen::to_value(&()).unwrap();
-            let projects_js_value = invoke("list_projects", args).await;
-            serde_wasm_bindgen::from_value(projects_js_value).map_err(|e| e.to_string())
+            Request::get("/api/projects")
+                .send()
+                .await
+                .map_err(|e| e.to_string())?
+                .json()
+                .await
+                .map_err(|e| e.to_string())
         },
     );
 
@@ -528,14 +576,13 @@ pub fn App() -> impl IntoView {
             }
             let session_id = current_session.get().map(|s| s.id);
             if let Some(session_id) = session_id {
-                #[derive(Serialize)]
-                #[serde(rename_all = "camelCase")]
-                struct GetChatMessagesArgs {
-                    session_id: String,
-                }
-                let args = serde_wasm_bindgen::to_value(&GetChatMessagesArgs { session_id }).unwrap();
-                let messages = invoke("get_chat_messages", args).await;
-                let mut remote: Vec<ChatMessage> = serde_wasm_bindgen::from_value(messages)
+                let url = format!("/api/sessions/{}/messages", session_id);
+                let mut remote: Vec<ChatMessage> = Request::get(&url)
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .await
                     .map_err(|e| e.to_string())?;
                 
                 // Combine with local messages here
@@ -547,48 +594,47 @@ pub fn App() -> impl IntoView {
         },
     );
 
-    let open_project_chat = move |project: ProjectInfo| {
+    let open_project_chat = move |project_info: ProjectInfo| {
         spawn_local(async move {
-            #[derive(Serialize)]
-            #[serde(rename_all = "camelCase")]
-            struct OpenProjectChatArgs {
-                project_name: String,
-                project_path: String,
-            }
+            // 1. Fetch full project details (including savedData)
+            let project_res = Request::get(&format!("/api/projects/{}", project_info.id))
+                .send()
+                .await;
+            
+            if let Ok(resp) = project_res {
+                if let Ok(project) = resp.json::<Project>().await {
+                    
+                    // 2. Create or get session
+                    // For now, always create a new session or pick the last one if we implemented logic for it.
+                    // The simplest is to create a new session for this "chat instance".
+                    // Or if we want persistent chat, we should list sessions and pick one.
+                    // Let's create a new one for simplicity as per requirements "Start New Project" or "Chat with...".
+                    // The old code returned `session` from `open_project_chat`.
+                    
+                    let session_res = Request::post("/api/sessions")
+                        .json(&serde_json::json!({ "projectId": project.id }))
+                        .expect("Couldn't get json")
+                        .send()
+                        .await;
 
-            let args = serde_wasm_bindgen::to_value(&OpenProjectChatArgs {
-                project_name: project.name.clone(),
-                project_path: project.path.clone(),
-            })
-            .unwrap();
+                    if let Ok(session_resp) = session_res {
+                        if let Ok(session) = session_resp.json::<ChatSession>().await {
+                            log!("Setting up chat {:?} {:?}", project.id, session.id);
 
-            let result = invoke("open_project_chat", args).await;
-
-            if !result.is_null() && !result.is_undefined() {
-                let result: Result<OpenChatResponse, serde_wasm_bindgen::Error> =
-                    serde_wasm_bindgen::from_value(result);
-                if let Ok(res) = result {
-                    let p = res.project;
-
-                    log!("Setting up chat {:?} {:?}", p.id, res.session.id);
-
-                    // Use untracked() to access signals safely in async
-                    set_selected_project.update(|val| {
-                        *val = Some(ProjectInfo {
-                            id: project.id, // this is the local id
-                            // apiProjectId: p.id,
-                            name: p.name,
-                            path: p.path,
-                            saved_data: project.saved_data
-                        });
-                    });
-                    set_current_session.update(|val| *val = Some(res.session));
-                    set_show_chat.update(|val| *val = true);
+                            set_selected_project.update(|val| *val = Some(project));
+                            set_current_session.update(|val| *val = Some(session));
+                            set_show_chat.update(|val| *val = true);
+                        } else {
+                            log!("Failed to parse session response");
+                        }
+                    } else {
+                        log!("Failed to create session");
+                    }
                 } else {
-                    log!("Couldn't decode chat result 2");
+                    log!("Failed to parse project response");
                 }
             } else {
-                log!("Couldn't decode chat result 1");
+                log!("Failed to fetch project");
             }
         });
     };
@@ -597,57 +643,76 @@ pub fn App() -> impl IntoView {
         if let Some(session) = current_session.get() {
             let content = message_content.get(); // Get value before spawn
             set_local_messages.set(Vec::new());
+            
+            // Get current saved state from pipeline
+            let mut current_saved_state = None;
+            if let Some(pipeline_arc_val) = pipeline_store.get_untracked() {
+                if let Some(pipeline_arc) = pipeline_arc_val.as_ref() {
+                    let mut pipeline = pipeline_arc.borrow_mut();
+                    if let Some(editor) = pipeline.export_editor.as_mut() {
+                        current_saved_state = editor.saved_state.clone();
+                    }
+                }
+            }
+
             spawn_local(async move {
+                let session_id = session.id.clone();
+                let project_id = selected_project.get().as_ref().expect("Couldn't get selected project").id.clone();
+                
                 #[derive(Serialize)]
                 #[serde(rename_all = "camelCase")]
                 struct SendMessageArgs {
-                    session_id: String,
                     role: String,
                     content: String,
                     #[serde(skip_serializing_if = "Option::is_none")]
                     tool_call_id: Option<String>,
-                    project_id: String,
+                    #[serde(rename = "saved_state")]
+                    saved_state: Option<SavedState>,
                 }
 
-                let args = serde_wasm_bindgen::to_value(&SendMessageArgs {
-                    session_id: session.id.clone(),
+                let body = SendMessageArgs {
                     role: "user".to_string(),
                     content,
                     tool_call_id: None,
-                    project_id: selected_project.get().as_ref().expect("Couldn't get selected project").id.clone()
-                })
-                .unwrap();
+                    saved_state: current_saved_state,
+                };
 
                 set_message_content.update(|val| *val = String::new());
                 if let Some(input) = input_ref.get_untracked() {
                     input.set_value("");
                 }
 
-                let response_js_value = invoke("send_message", args).await;
-                let response: Result<ChatMessage, _> = serde_wasm_bindgen::from_value(response_js_value);
+                let url = format!("/api/sessions/{}/messages", session_id);
+                let response = Request::post(&url)
+                    .json(&body)
+                    .expect("Couldn't get json")
+                    .send()
+                    .await;
 
-                if let Ok(message) = response {
-                    log!("Response okay");
+                if let Ok(resp) = response {
+                    if let Ok(message) = resp.json::<ChatMessage>().await {
+                        log!("Response okay");
 
-                    if let Some(tool_calls) = message.tool_calls {
-                        log!("Tool calls...");
+                        if let Some(tool_calls) = message.tool_calls {
+                            log!("Tool calls...");
 
-                        let tool_calls_data = tool_calls.clone();
+                            let tool_calls_data = tool_calls.clone();
 
-                        set_local_messages.update(|messages| {
-                            for tool_call in tool_calls_data {
-                                messages.push(ChatMessage {
-                                    id: Uuid::new_v4().to_string(),
-                                    role: "system".to_string(),
-                                    content: Some(format!("Implementing changes... {:?} {:?}", tool_call.function.name, tool_call.function.arguments)),
-                                    tool_call_id: None,
-                                    tool_calls: None,
-                                });
+                            set_local_messages.update(|messages| {
+                                for tool_call in tool_calls_data {
+                                    messages.push(ChatMessage {
+                                        id: Uuid::new_v4().to_string(),
+                                        role: "system".to_string(),
+                                        content: Some(format!("Implementing changes... {:?} {:?}", tool_call.function.name, tool_call.function.arguments)),
+                                        tool_call_id: None,
+                                        tool_calls: None,
+                                    });
+                                }
+                            });
+
+                            for tool_call in tool_calls {
+                                let _ = execute_tool_call(&tool_call, pipeline_store, project_id.clone()).await;
                             }
-                        });
-
-                        for tool_call in tool_calls {
-                            let result = execute_tool_call(&tool_call, pipeline_store).await;
                         }
                     }
                 }

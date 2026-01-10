@@ -1323,6 +1323,7 @@ dependencies = [
  "console_error_panic_hook",
  "entropy-engine",
  "getrandom 0.2.16",
+ "gloo-net",
  "js-sys",
  "leptos",
  "leptos-use",
