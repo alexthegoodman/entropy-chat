@@ -24,6 +24,8 @@ use entropy_engine::handlers::{EntropyPosition, handle_key_press, handle_mouse_m
 use entropy_engine::water_plane::config::WaterConfig;
 use entropy_engine::procedural_grass::grass::GrassConfig;
 use entropy_engine::shape_primitives::{Cube::Cube, Sphere::Sphere};
+use entropy_engine::procedural_heightmaps::heightmap_generation::{HeightmapGenerator, TerrainFeature, FeatureType, FalloffType};
+use entropy_engine::helpers::landscapes::generate_landscape_data;
 use std::time::{Duration, SystemTime};
 use gloo_net::http::Request;
 
@@ -183,6 +185,26 @@ async fn execute_tool_call(
         r#type: String,
         position: [f32; 3],
         scale: Option<[f32; 3]>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct TerrainFeatureArgs {
+        r#type: String,
+        center: [f64; 2],
+        radius: f64,
+        intensity: f64,
+        falloff: String,
+        flat_top: Option<f64>,
+        transition: Option<f64>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct GenerateHeightmapArgs {
+        seed: Option<u32>,
+        scale: Option<f64>,
+        persistence: Option<f64>,
+        lacunarity: Option<f64>,
+        features: Option<Vec<TerrainFeatureArgs>>,
     }
 
     let mut saved_state_clone = None;
@@ -460,6 +482,95 @@ async fn execute_tool_call(
                                 },
                                 _ => log!("Unknown primitive type"),
                             }
+                            
+                            if let Some(saved_state) = editor.saved_state.as_mut() {
+                                saved_state_clone = Some(saved_state.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else if tool_call.function.name == "generateHeightmap" {
+        log!("Generating heightmap...");
+        let args: Result<GenerateHeightmapArgs, _> = serde_json::from_str(&tool_call.function.arguments);
+        if let Ok(args) = args {
+            if let Some(pipeline_arc_val) = pipeline_store.get() {
+                if let Some(pipeline_arc) = pipeline_arc_val.as_ref() {
+                    let mut pipeline = pipeline_arc.borrow_mut();
+                    if let Some(editor) = pipeline.export_editor.as_mut() {
+                        let width = 256;
+                        let height = 256;
+                        let mut generator = HeightmapGenerator::new(width, height);
+                        
+                        if let Some(seed) = args.seed { generator = generator.with_seed(seed); }
+                        if let Some(scale) = args.scale { generator = generator.with_scale(scale); }
+                        if let Some(persistence) = args.persistence { generator = generator.with_persistence(persistence); }
+                        if let Some(lacunarity) = args.lacunarity { generator = generator.with_lacunarity(lacunarity); }
+
+                        if let Some(features) = args.features {
+                            for f in features {
+                                let f_type = match f.r#type.as_str() {
+                                    "Mountain" => FeatureType::Mountain,
+                                    "Valley" => FeatureType::Valley,
+                                    "Plateau" => FeatureType::Plateau,
+                                    "Ridge" => FeatureType::Ridge,
+                                    _ => FeatureType::Mountain,
+                                };
+                                let falloff = match f.falloff.as_str() {
+                                    "Linear" => FalloffType::Linear,
+                                    "Smooth" => FalloffType::Smooth,
+                                    "Gaussian" => FalloffType::Gaussian,
+                                    _ => FalloffType::Smooth,
+                                };
+                                let mut feature = TerrainFeature::new(
+                                    (f.center[0], f.center[1]),
+                                    f.radius,
+                                    f.intensity,
+                                    falloff,
+                                    f_type
+                                );
+                                if let Some(ft) = f.flat_top { feature = feature.with_flat_top(ft); }
+                                if let Some(t) = f.transition { feature = feature.with_transition(t); }
+                                generator.add_feature(feature);
+                            }
+                        }
+
+                        let img = generator.generate();
+                        
+                        // Convert image buffer to normalized float vector
+                        // 16-bit grayscale (0-65535) -> 0.0-1.0
+                        let height_data: Vec<f32> = img.pixels().map(|p| p.0[0] as f32 / 65535.0).collect();
+
+                        let landscape_data = generate_landscape_data(
+                            width as usize,
+                            height as usize,
+                            height_data,
+                            1024.0 * 4.0, // size match existing default or reasonable size
+                            1024.0 * 4.0,
+                            150.0 * 4.0, // height scale
+                        );
+
+                        if let Some(renderer_state) = editor.renderer_state.as_mut() {
+                            // Clear existing landscapes
+                            renderer_state.landscapes.clear();
+                            renderer_state.terrain_managers.clear();
+                            
+                            // Add new landscape
+                            let device = &editor.gpu_resources.as_ref().unwrap().device;
+                            let queue = &editor.gpu_resources.as_ref().unwrap().queue;
+                            let camera = editor.camera.as_ref().unwrap();
+                            
+                            renderer_state.add_landscape(
+                                device,
+                                queue,
+                                &"generated_landscape".to_string(),
+                                &landscape_data,
+                                [0.0, 0.0, 0.0],
+                                camera
+                            );
+                            
+                            log!("Heightmap generated and loaded!");
                             
                             if let Some(saved_state) = editor.saved_state.as_mut() {
                                 saved_state_clone = Some(saved_state.clone());
