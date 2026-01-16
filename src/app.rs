@@ -190,6 +190,12 @@ async fn execute_tool_call(
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct SaveScriptArgs {
+        filename: String,
+        content: String,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     struct TerrainFeatureArgs {
         r#type: String,
         center: [f64; 2],
@@ -491,6 +497,30 @@ async fn execute_tool_call(
                         }
                     }
                 }
+            }
+        }
+    } else if tool_call.function.name == "saveScript" {
+        log!("Saving script...");
+        let args: Result<SaveScriptArgs, _> = serde_json::from_str(&tool_call.function.arguments);
+        if let Ok(args) = args {
+             // We need the project path. It's in `selected_project`.
+            let project_path = selected_project.get_untracked().map(|p| p.path).unwrap_or_default();
+            
+            if !project_path.is_empty() {
+                let url = format!("{}/api/save-script", get_api_url());
+                let body = serde_json::json!({
+                    "projectPath": project_path,
+                    "filename": args.filename,
+                    "content": args.content
+                });
+                
+                spawn_local(async move {
+                    let _ = Request::post(&url)
+                        .json(&body)
+                        .expect("Couldn't make post body")
+                        .send()
+                        .await;
+                });
             }
         }
     } else if tool_call.function.name == "generateHeightmap" {
