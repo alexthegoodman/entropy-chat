@@ -530,9 +530,13 @@ async fn execute_tool_call(
                             ([0.0, 0.0, 0.0], "default".to_string(), "heightmap.png".to_string())
                         };
 
-                        let width = 256;
-                        let height = 256;
-                        let mut generator = HeightmapGenerator::new(width, height);
+                        let width = 1024;
+                        let height = 1024;
+                        let mut generator = HeightmapGenerator::new(width, height)
+                                                                    .with_scale(1024.0)
+                                                                    .with_octaves(8)
+                                                                    .with_persistence(0.5)
+                                                                    .with_seed(42);
                         
                         if let Some(seed) = args.seed { generator = generator.with_seed(seed); }
                         if let Some(scale) = args.scale { generator = generator.with_scale(scale); }
