@@ -22,6 +22,8 @@ use entropy_engine::helpers::load_project::load_project;
 use leptos::web_sys;
 use entropy_engine::handlers::{EntropyPosition, handle_key_press, handle_mouse_move, handle_mouse_move_on_shift};
 use entropy_engine::water_plane::config::WaterConfig;
+use entropy_engine::procedural_grass::grass::GrassConfig;
+use entropy_engine::shape_primitives::{Cube::Cube, Sphere::Sphere};
 use std::time::{Duration, SystemTime};
 use gloo_net::http::Request;
 
@@ -164,6 +166,23 @@ async fn execute_tool_call(
         pub wave3_speed: Option<f32>,
         pub wave3_steepness: Option<f32>,
         pub wave3_direction: Option<[f32; 2]>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct ConfigureGrassArgs {
+        wind_strength: Option<f32>,
+        wind_speed: Option<f32>,
+        blade_height: Option<f32>,
+        blade_width: Option<f32>,
+        blade_density: Option<f32>,
+        render_distance: Option<f32>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct SpawnPrimitiveArgs {
+        r#type: String,
+        position: [f32; 3],
+        scale: Option<[f32; 3]>,
     }
 
     let mut saved_state_clone = None;
@@ -335,6 +354,115 @@ async fn execute_tool_call(
                                     // Let's assume for now we just trigger save.
                                     saved_state_clone = Some(saved_state.clone());
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else if tool_call.function.name == "configureGrass" {
+        log!("Configuring grass...");
+        let args: Result<ConfigureGrassArgs, _> = serde_json::from_str(&tool_call.function.arguments);
+        if let Ok(args) = args {
+             if let Some(pipeline_arc_val) = pipeline_store.get() {
+                if let Some(pipeline_arc) = pipeline_arc_val.as_ref() {
+                    let mut pipeline = pipeline_arc.borrow_mut();
+                    if let Some(editor) = pipeline.export_editor.as_mut() {
+                        if let Some(renderer_state) = editor.renderer_state.as_mut() {
+                            if let Some(grass) = renderer_state.grasses.get_mut(0) {
+                                let mut current_config = grass.config;
+
+                                if let Some(val) = args.wind_strength { current_config.wind_strength = val; }
+                                if let Some(val) = args.wind_speed { current_config.wind_speed = val; }
+                                if let Some(val) = args.blade_height { current_config.blade_height = val; }
+                                if let Some(val) = args.blade_width { current_config.blade_width = val; }
+                                if let Some(val) = args.blade_density { current_config.blade_density = val; }
+                                if let Some(val) = args.render_distance { current_config.render_distance = val; }
+
+                                grass.update_config(&editor.gpu_resources.as_ref().expect("Couldn't get gpu resources").queue, current_config);
+                                log!("Grass configured {:?}", grass.config);
+                                
+                                // Trigger save if needed
+                                if let Some(saved_state) = editor.saved_state.as_mut() {
+                                    saved_state_clone = Some(saved_state.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else if tool_call.function.name == "spawnPrimitive" {
+        log!("Spawning primitive...");
+        let args: Result<SpawnPrimitiveArgs, _> = serde_json::from_str(&tool_call.function.arguments);
+        if let Ok(args) = args {
+            if let Some(pipeline_arc_val) = pipeline_store.get() {
+                if let Some(pipeline_arc) = pipeline_arc_val.as_ref() {
+                    let mut pipeline = pipeline_arc.borrow_mut();
+                    if let Some(editor) = pipeline.export_editor.as_mut() {
+                        let device = &editor.gpu_resources.as_ref().unwrap().device;
+                        let queue = &editor.gpu_resources.as_ref().unwrap().queue;
+                        let model_layout = editor.model_bind_group_layout.as_ref().unwrap();
+                        let group_layout = editor.group_bind_group_layout.as_ref().unwrap();
+                        let camera = editor.camera.as_ref().unwrap();
+
+                        // We need access to texture render mode buffer which is in RendererState or Pipeline
+                        // But access via RendererState is hard because we are borrowing pipeline/editor.
+                        // However, Cube::new needs it.
+                        // In pipeline.rs, `texture_render_mode_buffer` is passed to `RendererState`.
+                        // But `editor.renderer_state` has it.
+                        // `renderer_state.texture_render_mode_buffer`
+                        
+                        let buffer = if let Some(rs) = &editor.renderer_state {
+                            rs.texture_render_mode_buffer.clone()
+                        } else {
+                            // Fallback or error
+                            log!("Renderer state not found");
+                            return "{\"success\": false}".to_string();
+                        };
+
+                        if let Some(renderer_state) = editor.renderer_state.as_mut() {
+                            match args.r#type.as_str() {
+                                "Cube" => {
+                                    let mut cube = Cube::new(
+                                        device,
+                                        queue,
+                                        model_layout,
+                                        group_layout,
+                                        &buffer,
+                                        camera
+                                    );
+                                    cube.transform.update_position(args.position);
+                                    if let Some(scale) = args.scale {
+                                        cube.transform.update_scale(scale);
+                                    }
+                                    renderer_state.cubes.push(cube);
+                                },
+                                "Sphere" => {
+                                    let mut sphere = Sphere::new(
+                                        device,
+                                        queue,
+                                        model_layout,
+                                        group_layout,
+                                        &buffer,
+                                        camera,
+                                        1.0, // radius
+                                        32, // sectors
+                                        32, // stacks
+                                        [1.0, 1.0, 1.0], // color
+                                        false // debug_moving
+                                    );
+                                    sphere.transform.update_position(args.position);
+                                    if let Some(scale) = args.scale {
+                                        sphere.transform.update_scale(scale);
+                                    }
+                                    renderer_state.spheres.push(sphere);
+                                },
+                                _ => log!("Unknown primitive type"),
+                            }
+                            
+                            if let Some(saved_state) = editor.saved_state.as_mut() {
+                                saved_state_clone = Some(saved_state.clone());
                             }
                         }
                     }

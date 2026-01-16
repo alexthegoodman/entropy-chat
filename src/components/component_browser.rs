@@ -172,7 +172,7 @@ fn ComponentPropertyPanel(
                     />
                 }.into_view().into_any(),
                 
-                None => view! { <div></div> }.into_view().into_any(),
+                _ => view! { <div></div> }.into_view().into_any(),
             }}
             
             // Scatter settings (optional for any component)
