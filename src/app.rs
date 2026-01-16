@@ -28,6 +28,7 @@ use entropy_engine::procedural_heightmaps::heightmap_generation::{HeightmapGener
 use entropy_engine::helpers::landscapes::generate_landscape_data;
 use std::time::{Duration, SystemTime};
 use gloo_net::http::Request;
+use web_sys::FormData;
 
 use crate::components::component_browser::ComponentPropertiesEditor;
 
@@ -118,6 +119,7 @@ async fn execute_tool_call(
     tool_call: &ToolCall,
     pipeline_store: LocalResource<Option<Rc<RefCell<ExportPipeline>>>>,
     project_id: String,
+    selected_project: ReadSignal<Option<Project>>,
 ) -> String {
     log!("Executing tool call: {:?}", tool_call.function.name);
 
@@ -499,6 +501,35 @@ async fn execute_tool_call(
                 if let Some(pipeline_arc) = pipeline_arc_val.as_ref() {
                     let mut pipeline = pipeline_arc.borrow_mut();
                     if let Some(editor) = pipeline.export_editor.as_mut() {
+                        // 1. Find existing landscape info
+                        let mut existing_info = None;
+                        if let Some(saved_state) = editor.saved_state.as_ref() {
+                            if let Some(levels) = saved_state.levels.as_ref() {
+                                if let Some(components) = levels.get(0).and_then(|l| l.components.as_ref()) {
+                                    if let Some(component) = components.iter().find(|c| c.kind == Some(entropy_engine::helpers::saved_data::ComponentKind::Landscape)) {
+                                        let position = component.generic_properties.position;
+                                        let asset_id = component.asset_id.clone();
+                                        
+                                        // Find asset in saved_state.landscapes
+                                        if let Some(landscapes) = saved_state.landscapes.as_ref() {
+                                            if let Some(landscape_data) = landscapes.iter().find(|l| l.id == asset_id) {
+                                                if let Some(heightmap_file) = &landscape_data.heightmap {
+                                                    existing_info = Some((position, asset_id, heightmap_file.fileName.clone()));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let (position, asset_id, filename) = if let Some(info) = existing_info {
+                            info
+                        } else {
+                            log!("No existing landscape found to replace.");
+                            ([0.0, 0.0, 0.0], "default".to_string(), "heightmap.png".to_string())
+                        };
+
                         let width = 256;
                         let height = 256;
                         let mut generator = HeightmapGenerator::new(width, height);
@@ -538,8 +569,48 @@ async fn execute_tool_call(
 
                         let img = generator.generate();
                         
-                        // Convert image buffer to normalized float vector
-                        // 16-bit grayscale (0-65535) -> 0.0-1.0
+                        // Convert to PNG bytes
+                        let mut png_bytes: Vec<u8> = Vec::new();
+                        let _ = image::ImageBuffer::from_raw(width, height, img.clone().into_raw())
+                            .map(|buf: image::ImageBuffer<image::Luma<u16>, Vec<u16>>| {
+                                let dyn_img = image::DynamicImage::ImageLuma16(buf);
+                                let _ = dyn_img.write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png);
+                            });
+
+                        // Upload to API
+                        // We need the project path. It's in `selected_project`.
+                        let project_path = selected_project.get_untracked().map(|p| p.path).unwrap_or_default();
+                        
+                        if !png_bytes.is_empty() && !project_path.is_empty() {
+                            let file_part = FormData::new().expect("FormData error");
+                            // file_part.append("projectPath", &project_path);
+                            
+                            // Manually constructing body or using a way to send FormData compatible with the server
+                            // Gloo-net Request supports body.
+                            
+                            // Let's use web_sys for FormData as it's cleaner in browser context
+                            let form_data = web_sys::FormData::new().unwrap();
+                            form_data.append_with_str("projectPath", &project_path).unwrap();
+                            form_data.append_with_str("landscapeAssetId", &asset_id).unwrap();
+                            form_data.append_with_str("filename", &filename).unwrap();
+                            
+                            let uint8_array = js_sys::Uint8Array::from(&png_bytes[..]);
+                            let blob_parts = js_sys::Array::new();
+                            blob_parts.push(&uint8_array);
+                            let blob = web_sys::Blob::new_with_u8_array_sequence(&blob_parts).unwrap();
+                            form_data.append_with_blob("file", &blob).unwrap();
+
+                            let url = format!("{}/api/save-heightmap", get_api_url());
+                            spawn_local(async move {
+                                let _ = Request::post(&url)
+                                    .body(form_data)
+                                    .expect("Couldn't make post body")
+                                    .send()
+                                    .await;
+                            });
+                        }
+
+                        // Update In-Memory
                         let height_data: Vec<f32> = img.pixels().map(|p| p.0[0] as f32 / 65535.0).collect();
 
                         let landscape_data = generate_landscape_data(
@@ -556,7 +627,7 @@ async fn execute_tool_call(
                             renderer_state.landscapes.clear();
                             renderer_state.terrain_managers.clear();
                             
-                            // Add new landscape
+                            // Add new landscape with CORRECT position
                             let device = &editor.gpu_resources.as_ref().unwrap().device;
                             let queue = &editor.gpu_resources.as_ref().unwrap().queue;
                             let camera = editor.camera.as_ref().unwrap();
@@ -566,7 +637,7 @@ async fn execute_tool_call(
                                 queue,
                                 &"generated_landscape".to_string(),
                                 &landscape_data,
-                                [0.0, 0.0, 0.0],
+                                position, // Use the position from saved_state
                                 camera
                             );
                             
@@ -963,7 +1034,7 @@ pub fn App() -> impl IntoView {
                             });
 
                             for tool_call in tool_calls {
-                                let _ = execute_tool_call(&tool_call, pipeline_store, project_id.clone()).await;
+                                let _ = execute_tool_call(&tool_call, pipeline_store, project_id.clone(), selected_project).await;
                             }
                         }
                     }

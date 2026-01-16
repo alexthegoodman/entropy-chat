@@ -1324,6 +1324,7 @@ dependencies = [
  "entropy-engine",
  "getrandom 0.2.16",
  "gloo-net",
+ "image",
  "js-sys",
  "leptos",
  "leptos-use",
