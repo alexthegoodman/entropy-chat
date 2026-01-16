@@ -190,6 +190,25 @@ async fn execute_tool_call(
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct ConfigureSkyArgs {
+        horizon_color: Option<[f32; 3]>,
+        zenith_color: Option<[f32; 3]>,
+        sun_direction: Option<[f32; 3]>,
+        sun_color: Option<[f32; 3]>,
+        sun_intensity: Option<f32>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct ConfigureTreesArgs {
+        component_id: String,
+        seed: Option<u32>,
+        trunk_height: Option<f32>,
+        trunk_radius: Option<f32>,
+        branch_levels: Option<u32>,
+        foliage_radius: Option<f32>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     struct SaveScriptArgs {
         filename: String,
         content: String,
@@ -384,6 +403,80 @@ async fn execute_tool_call(
                                     // If water config is NOT in saved_state, saving it won't help unless we sync it.
                                     // Let's assume for now we just trigger save.
                                     saved_state_clone = Some(saved_state.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else if tool_call.function.name == "configureSky" {
+        log!("Configuring sky...");
+        let args: Result<ConfigureSkyArgs, _> = serde_json::from_str(&tool_call.function.arguments);
+        if let Ok(args) = args {
+            if let Some(pipeline_arc_val) = pipeline_store.get() {
+                if let Some(pipeline_arc) = pipeline_arc_val.as_ref() {
+                    let mut pipeline = pipeline_arc.borrow_mut();
+                    if let Some(editor) = pipeline.export_editor.as_mut() {
+                        if let Some(saved_state) = editor.saved_state.as_mut() {
+                            if let Some(level) = saved_state.levels.as_mut().and_then(|l| l.get_mut(0)) {
+                                if level.procedural_sky.is_none() {
+                                    level.procedural_sky = Some(entropy_engine::helpers::saved_data::ProceduralSkyConfig::default());
+                                }
+                                if let Some(sky) = level.procedural_sky.as_mut() {
+                                    if let Some(color) = args.horizon_color { sky.horizon_color = color; }
+                                    if let Some(color) = args.zenith_color { sky.zenith_color = color; }
+                                    if let Some(dir) = args.sun_direction { sky.sun_direction = dir; }
+                                    if let Some(color) = args.sun_color { sky.sun_color = color; }
+                                    if let Some(intensity) = args.sun_intensity { sky.sun_intensity = intensity; }
+                                }
+                            }
+                            saved_state_clone = Some(saved_state.clone());
+                        }
+                    }
+                }
+            }
+        }
+    } else if tool_call.function.name == "configureTrees" {
+        log!("Configuring trees...");
+        let args: Result<ConfigureTreesArgs, _> = serde_json::from_str(&tool_call.function.arguments);
+        if let Ok(args) = args {
+            if let Some(pipeline_arc_val) = pipeline_store.get() {
+                if let Some(pipeline_arc) = pipeline_arc_val.as_ref() {
+                    let mut pipeline = pipeline_arc.borrow_mut();
+                    if let Some(editor) = pipeline.export_editor.as_mut() {
+                        let mut new_tree_props = None;
+                        
+                        // Update SavedState
+                        if let Some(saved_state) = editor.saved_state.as_mut() {
+                            if let Some(level) = saved_state.levels.as_mut().and_then(|l| l.get_mut(0)) {
+                                if let Some(components) = level.components.as_mut() {
+                                    if let Some(component) = components.iter_mut().find(|c| c.id == args.component_id) {
+                                        if component.procedural_tree_properties.is_none() {
+                                            component.procedural_tree_properties = Some(entropy_engine::helpers::saved_data::ProceduralTreeProperties::default());
+                                        }
+                                        if let Some(props) = component.procedural_tree_properties.as_mut() {
+                                            if let Some(val) = args.seed { props.seed = val; }
+                                            if let Some(val) = args.trunk_height { props.trunk_height = val; }
+                                            if let Some(val) = args.trunk_radius { props.trunk_radius = val; }
+                                            if let Some(val) = args.branch_levels { props.branch_levels = val; }
+                                            if let Some(val) = args.foliage_radius { props.foliage_radius = val; }
+                                            new_tree_props = Some(props.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            saved_state_clone = Some(saved_state.clone());
+                        }
+
+                        // Update RendererState (live update)
+                        if let Some(renderer_state) = editor.renderer_state.as_mut() {
+                            if let Some(new_props) = new_tree_props {
+                                // For now, update ALL trees since we don't have ID mapping easily accessible in renderer_state yet
+                                // Or assume single tree system per level
+                                for trees in &mut renderer_state.procedural_trees {
+                                    let device = &editor.gpu_resources.as_ref().unwrap().device;
+                                    trees.regenerate(device, new_props.clone());
                                 }
                             }
                         }
