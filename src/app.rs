@@ -193,6 +193,7 @@ async fn execute_tool_call(
     struct SaveScriptArgs {
         filename: String,
         content: String,
+        componentId: Option<String>,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -503,6 +504,29 @@ async fn execute_tool_call(
         log!("Saving script...");
         let args: Result<SaveScriptArgs, _> = serde_json::from_str(&tool_call.function.arguments);
         if let Ok(args) = args {
+            // Update the component script path if provided
+            if let Some(component_id) = &args.componentId {
+                if let Some(pipeline_arc_val) = pipeline_store.get() {
+                    if let Some(pipeline_arc) = pipeline_arc_val.as_ref() {
+                        let mut pipeline = pipeline_arc.borrow_mut();
+                        if let Some(editor) = pipeline.export_editor.as_mut() {
+                            // Update SavedState
+                            if let Some(saved_state) = editor.saved_state.as_mut() {
+                                if let Some(level) = saved_state.levels.as_mut().and_then(|l| l.get_mut(0)) {
+                                    if let Some(components) = level.components.as_mut() {
+                                        if let Some(component) = components.iter_mut().find(|c| c.id == *component_id) {
+                                            let script_path = format!("scripts/{}", args.filename);
+                                            component.rhai_script_path = Some(script_path);
+                                        }
+                                    }
+                                }
+                                saved_state_clone = Some(saved_state.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            
              // We need the project path. It's in `selected_project`.
             let project_path = selected_project.get_untracked().map(|p| p.path).unwrap_or_default();
             
