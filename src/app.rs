@@ -20,7 +20,7 @@ use leptos::logging::log;
 use wasm_bindgen_futures::spawn_local as wasm_spawn_local;
 use entropy_engine::helpers::load_project::load_project;
 use leptos::web_sys;
-use entropy_engine::handlers::{EntropyPosition, handle_key_press, handle_mouse_move, handle_mouse_move_on_shift, handle_add_model, handle_add_collectable};
+use entropy_engine::handlers::{EntropyPosition, handle_key_press, handle_mouse_move, handle_mouse_move_on_shift, handle_add_model, handle_add_collectable, handle_add_water_plane};
 use entropy_engine::water_plane::config::WaterConfig;
 use entropy_engine::procedural_grass::grass::GrassConfig;
 use entropy_engine::shape_primitives::{Cube::Cube, Sphere::Sphere};
@@ -136,6 +136,8 @@ async fn execute_tool_call(
     #[derive(Debug, Clone, Serialize, Deserialize)]
     // #[serde(rename_all = "camelCase")]
     struct ConfigureWaterArgs {
+        #[serde(rename = "componentId")]
+        component_id: Option<String>,
         shallow_color: Option<[f32; 3]>,
         medium_color: Option<[f32; 3]>,
         deep_color: Option<[f32; 3]>,
@@ -175,11 +177,13 @@ async fn execute_tool_call(
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct ConfigureGrassArgs {
+        #[serde(rename = "componentId")]
+        component_id: Option<String>,
         wind_strength: Option<f32>,
         wind_speed: Option<f32>,
         blade_height: Option<f32>,
         blade_width: Option<f32>,
-        blade_density: Option<f32>,
+        blade_density: Option<f32>, // Changing to f32 to match tool definition, will cast to u32
         render_distance: Option<f32>,
     }
 
@@ -192,6 +196,8 @@ async fn execute_tool_call(
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct ConfigureSkyArgs {
+        #[serde(rename = "componentId")]
+        component_id: Option<String>,
         horizon_color: Option<[f32; 3]>,
         zenith_color: Option<[f32; 3]>,
         sun_direction: Option<[f32; 3]>,
@@ -201,7 +207,8 @@ async fn execute_tool_call(
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct ConfigureTreesArgs {
-        component_id: String,
+        #[serde(rename = "componentId")]
+        component_id: Option<String>,
         seed: Option<u32>,
         trunk_height: Option<f32>,
         trunk_radius: Option<f32>,
@@ -256,6 +263,8 @@ async fn execute_tool_call(
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct GenerateHeightmapArgs {
+        #[serde(rename = "componentId")]
+        component_id: Option<String>,
         seed: Option<u32>,
         scale: Option<f64>,
         persistence: Option<f64>,
@@ -321,6 +330,22 @@ async fn execute_tool_call(
                     let mut pipeline = pipeline_arc.borrow_mut();
                     if let Some(editor) = pipeline.export_editor.as_mut() {
                         if let Some(renderer_state) = editor.renderer_state.as_mut() {
+                            
+                            // Check if we have any water planes
+                            if renderer_state.water_planes.is_empty() {
+                                // Try to create one if we have a landscape
+                                if let Some(landscape) = renderer_state.landscapes.first() {
+                                     let landscape_id = landscape.id.clone();
+                                     let device = &editor.gpu_resources.as_ref().unwrap().device;
+                                     let camera_binding = editor.camera_binding.as_ref().unwrap(); 
+                                     let surface_format = wgpu::TextureFormat::Rgba8Unorm; // Matching ProjectCanvas
+                                     
+                                     handle_add_water_plane(renderer_state, device, &camera_binding.bind_group_layout, surface_format, landscape_id.clone());
+                                     log!("Water plane created for landscape {}", landscape_id);
+                                }
+                            }
+
+                            // Now configure the first water plane (assuming single water plane support for now)
                             if let Some(water_plane) = renderer_state.water_planes.get_mut(0) {
                                 let mut current_config = water_plane.config; // Get current config
 
@@ -423,13 +448,6 @@ async fn execute_tool_call(
                                 log!("Water plane configured {:?}", water_plane.config);
 
                                 if let Some(saved_state) = editor.saved_state.as_mut() {
-                                    // Assuming water config is part of saved_state (it should be in level components or global config)
-                                    // If not, we might need to update where it is stored in SavedState.
-                                    // For now, let's clone saved_state to trigger a save, assuming the water config changes are reflected in it 
-                                    // OR we need to update the saved_state from the renderer_state.
-                                    // But typically editor.saved_state is the source of truth for saving.
-                                    // If water config is NOT in saved_state, saving it won't help unless we sync it.
-                                    // Let's assume for now we just trigger save.
                                     saved_state_clone = Some(saved_state.clone());
                                 }
                             }
@@ -479,18 +497,51 @@ async fn execute_tool_call(
                         if let Some(saved_state) = editor.saved_state.as_mut() {
                             if let Some(level) = saved_state.levels.as_mut().and_then(|l| l.get_mut(0)) {
                                 if let Some(components) = level.components.as_mut() {
-                                    if let Some(component) = components.iter_mut().find(|c| c.id == args.component_id) {
-                                        if component.procedural_tree_properties.is_none() {
-                                            component.procedural_tree_properties = Some(entropy_engine::helpers::saved_data::ProceduralTreeProperties::default());
+                                    
+                                    let mut found = false;
+                                    for component in components.iter_mut() {
+                                        if component.kind == Some(entropy_engine::helpers::saved_data::ComponentKind::ProceduralTree) {
+                                            if let Some(target_id) = &args.component_id {
+                                                if &component.id != target_id {
+                                                    continue;
+                                                }
+                                            }
+                                            
+                                            if component.procedural_tree_properties.is_none() {
+                                                component.procedural_tree_properties = Some(entropy_engine::helpers::saved_data::ProceduralTreeProperties::default());
+                                            }
+                                            if let Some(props) = component.procedural_tree_properties.as_mut() {
+                                                if let Some(val) = args.seed { props.seed = val; }
+                                                if let Some(val) = args.trunk_height { props.trunk_height = val; }
+                                                if let Some(val) = args.trunk_radius { props.trunk_radius = val; }
+                                                if let Some(val) = args.branch_levels { props.branch_levels = val; }
+                                                if let Some(val) = args.foliage_radius { props.foliage_radius = val; }
+                                                new_tree_props = Some(props.clone());
+                                            }
+                                            found = true;
+                                            break; 
                                         }
-                                        if let Some(props) = component.procedural_tree_properties.as_mut() {
-                                            if let Some(val) = args.seed { props.seed = val; }
-                                            if let Some(val) = args.trunk_height { props.trunk_height = val; }
-                                            if let Some(val) = args.trunk_radius { props.trunk_radius = val; }
-                                            if let Some(val) = args.branch_levels { props.branch_levels = val; }
-                                            if let Some(val) = args.foliage_radius { props.foliage_radius = val; }
-                                            new_tree_props = Some(props.clone());
-                                        }
+                                    }
+                                    
+                                    if !found && args.component_id.is_none() {
+                                        let props = entropy_engine::helpers::saved_data::ProceduralTreeProperties {
+                                            seed: args.seed.unwrap_or(0),
+                                            trunk_height: args.trunk_height.unwrap_or(3.5),
+                                            trunk_radius: args.trunk_radius.unwrap_or(0.25),
+                                            branch_levels: args.branch_levels.unwrap_or(4),
+                                            foliage_radius: args.foliage_radius.unwrap_or(0.5),
+                                        };
+                                        
+                                        let new_component = ComponentData {
+                                            id: Uuid::new_v4().to_string(),
+                                            kind: Some(entropy_engine::helpers::saved_data::ComponentKind::ProceduralTree),
+                                            asset_id: "".to_string(),
+                                            procedural_tree_properties: Some(props.clone()),
+                                            ..Default::default()
+                                        };
+                                        components.push(new_component);
+                                        new_tree_props = Some(props);
+                                        log!("Created new tree component in saved state.");
                                     }
                                 }
                             }
@@ -756,7 +807,88 @@ async fn execute_tool_call(
                 }
             }
         }
-    } else if tool_call.function.name == "configureGrass" {        log!("Spawning primitive...");
+    } else if tool_call.function.name == "configureGrass" {
+        log!("Configuring grass...");
+        let args: Result<ConfigureGrassArgs, _> = serde_json::from_str(&tool_call.function.arguments);
+        if let Ok(args) = args {
+             if let Some(pipeline_arc_val) = pipeline_store.get() {
+                if let Some(pipeline_arc) = pipeline_arc_val.as_ref() {
+                    let mut pipeline = pipeline_arc.borrow_mut();
+                    if let Some(editor) = pipeline.export_editor.as_mut() {
+                        
+                        // Update RendererState (Live)
+                        if let Some(renderer_state) = editor.renderer_state.as_mut() {
+                             for grass in renderer_state.grasses.iter_mut() {
+                                 if let Some(val) = args.wind_strength { grass.config.wind_strength = val; }
+                                 if let Some(val) = args.wind_speed { grass.config.wind_speed = val; }
+                                 if let Some(val) = args.blade_height { grass.config.blade_height = val; }
+                                 if let Some(val) = args.blade_width { grass.config.blade_width = val; }
+                                 if let Some(val) = args.blade_density { grass.config.blade_density = val; }
+                                 if let Some(val) = args.render_distance { grass.config.render_distance = val; }
+                             }
+                        }
+
+                        // Update SavedState
+                        if let Some(saved_state) = editor.saved_state.as_mut() {
+                            if let Some(level) = saved_state.levels.as_mut().and_then(|l| l.get_mut(0)) {
+                                if let Some(components) = level.components.as_mut() {
+                                    // Find existing grass
+                                    let mut found = false;
+                                    for component in components.iter_mut() {
+                                        if component.kind == Some(entropy_engine::helpers::saved_data::ComponentKind::ProceduralGrass) {
+                                            if let Some(target_id) = &args.component_id {
+                                                if &component.id != target_id {
+                                                    continue;
+                                                }
+                                            }
+                                            
+                                            if component.procedural_grass_properties.is_none() {
+                                                component.procedural_grass_properties = Some(entropy_engine::helpers::saved_data::ProceduralGrassProperties::default());
+                                            }
+                                            if let Some(props) = component.procedural_grass_properties.as_mut() {
+                                                if let Some(val) = args.wind_strength { props.wind_strength = val; }
+                                                if let Some(val) = args.wind_speed { props.wind_speed = val; }
+                                                if let Some(val) = args.blade_height { props.blade_height = val; }
+                                                if let Some(val) = args.blade_width { props.blade_width = val; }
+                                                if let Some(val) = args.blade_density { props.blade_density = val as u32; }
+                                                if let Some(val) = args.render_distance { props.render_distance = val; }
+                                            }
+                                            found = true;
+                                        }
+                                    }
+                                    
+                                    if !found && args.component_id.is_none() {
+                                        let new_grass_props = entropy_engine::helpers::saved_data::ProceduralGrassProperties {
+                                            wind_strength: args.wind_strength.unwrap_or(2.5),
+                                            wind_speed: args.wind_speed.unwrap_or(0.3),
+                                            blade_height: args.blade_height.unwrap_or(2.75),
+                                            blade_width: args.blade_width.unwrap_or(0.03),
+                                            blade_density: args.blade_density.unwrap_or(15.0) as u32,
+                                            render_distance: args.render_distance.unwrap_or(150.0),
+                                            grid_size: 10.0,
+                                            brownian_strength: 0.5,
+                                        };
+                                        
+                                        let new_component = ComponentData {
+                                            id: Uuid::new_v4().to_string(),
+                                            kind: Some(entropy_engine::helpers::saved_data::ComponentKind::ProceduralGrass),
+                                            asset_id: "".to_string(),
+                                            procedural_grass_properties: Some(new_grass_props),
+                                            ..Default::default()
+                                        };
+                                        components.push(new_component);
+                                        log!("Created new grass component in saved state.");
+                                    }
+                                }
+                            }
+                            saved_state_clone = Some(saved_state.clone());
+                        }
+                    }
+                }
+            }
+        }
+    } else if tool_call.function.name == "spawnPrimitive" {
+        log!("Spawning primitive...");
         let args: Result<SpawnPrimitiveArgs, _> = serde_json::from_str(&tool_call.function.arguments);
         if let Ok(args) = args {
             if let Some(pipeline_arc_val) = pipeline_store.get() {
@@ -889,18 +1021,39 @@ async fn execute_tool_call(
                     if let Some(editor) = pipeline.export_editor.as_mut() {
                         // 1. Find existing landscape info
                         let mut existing_info = None;
-                        if let Some(saved_state) = editor.saved_state.as_ref() {
-                            if let Some(levels) = saved_state.levels.as_ref() {
-                                if let Some(components) = levels.get(0).and_then(|l| l.components.as_ref()) {
-                                    if let Some(component) = components.iter().find(|c| c.kind == Some(entropy_engine::helpers::saved_data::ComponentKind::Landscape)) {
-                                        let position = component.generic_properties.position;
-                                        let asset_id = component.asset_id.clone();
-                                        
-                                        // Find asset in saved_state.landscapes
-                                        if let Some(landscapes) = saved_state.landscapes.as_ref() {
-                                            if let Some(landscape_data) = landscapes.iter().find(|l| l.id == asset_id) {
-                                                if let Some(heightmap_file) = &landscape_data.heightmap {
-                                                    existing_info = Some((position, asset_id, heightmap_file.fileName.clone()));
+                        
+                        if let Some(target_id) = &args.component_id {
+                             if let Some(saved_state) = editor.saved_state.as_ref() {
+                                if let Some(levels) = saved_state.levels.as_ref() {
+                                    if let Some(components) = levels.get(0).and_then(|l| l.components.as_ref()) {
+                                        if let Some(component) = components.iter().find(|c| c.id == *target_id) {
+                                             let position = component.generic_properties.position;
+                                             let asset_id = component.asset_id.clone();
+                                             
+                                             if let Some(landscapes) = saved_state.landscapes.as_ref() {
+                                                if let Some(landscape_data) = landscapes.iter().find(|l| l.id == asset_id) {
+                                                    if let Some(heightmap_file) = &landscape_data.heightmap {
+                                                        existing_info = Some((position, asset_id, heightmap_file.fileName.clone()));
+                                                    }
+                                                }
+                                             }
+                                        }
+                                    }
+                                }
+                             }
+                        } else {
+                             // Try to find first existing landscape if no ID specified
+                             if let Some(saved_state) = editor.saved_state.as_ref() {
+                                if let Some(levels) = saved_state.levels.as_ref() {
+                                    if let Some(components) = levels.get(0).and_then(|l| l.components.as_ref()) {
+                                        if let Some(component) = components.iter().find(|c| c.kind == Some(entropy_engine::helpers::saved_data::ComponentKind::Landscape)) {
+                                            let position = component.generic_properties.position;
+                                            let asset_id = component.asset_id.clone();
+                                            if let Some(landscapes) = saved_state.landscapes.as_ref() {
+                                                if let Some(landscape_data) = landscapes.iter().find(|l| l.id == asset_id) {
+                                                    if let Some(heightmap_file) = &landscape_data.heightmap {
+                                                        existing_info = Some((position, asset_id, heightmap_file.fileName.clone()));
+                                                    }
                                                 }
                                             }
                                         }
@@ -912,8 +1065,9 @@ async fn execute_tool_call(
                         let (position, asset_id, filename) = if let Some(info) = existing_info {
                             info
                         } else {
-                            log!("No existing landscape found to replace.");
-                            ([0.0, 0.0, 0.0], "default".to_string(), "heightmap.png".to_string())
+                            log!("Creating new landscape info.");
+                            let new_asset_id = Uuid::new_v4().to_string();
+                            ([0.0, 0.0, 0.0], new_asset_id, format!("heightmap_{}.png", Uuid::new_v4()))
                         };
 
                         let width = 1024;
