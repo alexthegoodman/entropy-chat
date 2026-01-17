@@ -1823,6 +1823,7 @@ pub fn App() -> impl IntoView {
                         // <button class="primary-btn">"Please move the sword near the shoreline"</button>
                         // <button class="primary-btn">"Let's turn the grass blue and more windy"</button>
                         // <button class="primary-btn">"Can we create some dialogue between Enemy 1 and the Player?"</button>
+                        <span>"Browse the scene preview with shift-click and the wasd keys, with the preview selected."</span>
                         <span>"You can also drop models and images here in the chat, but remember to let Chat know if you are sending textures, heightmaps, or something else so it gets organized properly"</span>
                         <span>"Feel free to chat about point lights, models, collectables, game behaviors, NPCs, particle effects, dialogue, quests, water, trees, grass, new terrains, or anything else that you would like to see in your game world"</span>
                     </div>
