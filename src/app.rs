@@ -1,8 +1,9 @@
 use entropy_engine::core::pipeline::ExportPipeline;
 use entropy_engine::core::editor::WindowSize;
 use entropy_engine::helpers::load_project::place_project;
-use entropy_engine::helpers::saved_data::{ComponentData, SavedState, ComponentKind, CollectableType, GenericProperties, CollectableProperties, LightProperties};
+use entropy_engine::helpers::saved_data::{ComponentData, SavedState, ComponentKind, CollectableType, GenericProperties, CollectableProperties, LightProperties, NPCProperties, AttackStats, CharacterStats};
 use entropy_engine::helpers::timelines::SavedTimelineStateConfig;
+use entropy_engine::game_behaviors::stateful::{BehaviorConfig, CombatType};
 use js_sys::Date;
 use leptos::html::Canvas;
 use leptos::task::spawn_local;
@@ -20,7 +21,7 @@ use leptos::logging::log;
 use wasm_bindgen_futures::spawn_local as wasm_spawn_local;
 use entropy_engine::helpers::load_project::load_project;
 use leptos::web_sys;
-use entropy_engine::handlers::{EntropyPosition, handle_key_press, handle_mouse_move, handle_mouse_move_on_shift, handle_add_model, handle_add_collectable, handle_add_water_plane};
+use entropy_engine::handlers::{EntropyPosition, handle_key_press, handle_mouse_move, handle_mouse_move_on_shift, handle_add_model, handle_add_collectable, handle_add_water_plane, handle_add_npc};
 use entropy_engine::water_plane::config::WaterConfig;
 use entropy_engine::procedural_grass::grass::GrassConfig;
 use entropy_engine::shape_primitives::{Cube::Cube, Sphere::Sphere};
@@ -241,6 +242,22 @@ async fn execute_tool_call(
         position: Option<[f32; 3]>,
         rotation: Option<[f32; 3]>,
         scale: Option<[f32; 3]>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct SpawnNPCArgs {
+        #[serde(rename = "assetId")]
+        asset_id: String,
+        position: Option<[f32; 3]>,
+        rotation: Option<[f32; 3]>,
+        scale: Option<[f32; 3]>,
+        aggressiveness: Option<f32>,
+        combat_type: Option<String>,
+        wander_radius: Option<f32>,
+        wander_speed: Option<f32>,
+        detection_radius: Option<f32>,
+        damage: Option<f32>,
+        health: Option<f32>,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -959,6 +976,115 @@ async fn execute_tool_call(
                             if let Some(saved_state) = editor.saved_state.as_mut() {
                                 saved_state_clone = Some(saved_state.clone());
                             }
+                        }
+                    }
+                }
+            }
+        }
+    } else if tool_call.function.name == "spawnNPC" {
+        log!("Spawning NPC...");
+        let args: Result<SpawnNPCArgs, _> = serde_json::from_str(&tool_call.function.arguments);
+        if let Ok(args) = args {
+            if let Some(pipeline_arc_val) = pipeline_store.get() {
+                if let Some(pipeline_arc) = pipeline_arc_val.as_ref() {
+                    let mut pipeline = pipeline_arc.borrow_mut();
+                    if let Some(editor) = pipeline.export_editor.as_mut() {
+                         let project_id = selected_project.get().as_ref().expect("Couldn't get selected project").id.clone();
+                         let mut asset_file_name = String::new();
+
+                        // Find asset in SavedState
+                        if let Some(saved_state) = editor.saved_state.as_ref() {
+                            if let Some(model) = saved_state.models.iter().find(|m| m.id == args.asset_id) {
+                                asset_file_name = model.fileName.clone();
+                            }
+                        }
+
+                        if !asset_file_name.is_empty() {
+                            let component_id = Uuid::new_v4().to_string();
+                            let pos = args.position.unwrap_or([0.0, 0.0, 0.0]);
+                            let rot = args.rotation.unwrap_or([0.0, 0.0, 0.0]);
+                            let scale = args.scale.unwrap_or([1.0, 1.0, 1.0]);
+
+                            let model_position = Translation3::new(pos[0], pos[1], pos[2]);
+                            let model_rotation = UnitQuaternion::from_euler_angles(
+                                rot[0].to_radians(), rot[1].to_radians(), rot[2].to_radians()
+                            );
+                            let model_iso = Isometry3::from_parts(model_position, model_rotation);
+                            let model_scale = Vector3::new(scale[0], scale[1], scale[2]);
+
+                            let combat_type = match args.combat_type.as_deref() {
+                                Some("Ranged") => CombatType::Ranged,
+                                _ => CombatType::Melee,
+                            };
+
+                            let damage = args.damage.unwrap_or(10.0);
+                            let attack_stats = Some(AttackStats {
+                                damage: damage,
+                                range: if combat_type == CombatType::Melee { 2.0 } else { 15.0 },
+                                cooldown: 1.5,
+                                wind_up_time: 0.5,
+                                recovery_time: 0.5,
+                            });
+
+                            let behavior_config = BehaviorConfig {
+                                aggressiveness: args.aggressiveness.unwrap_or(0.5),
+                                combat_type: combat_type,
+                                wander_radius: args.wander_radius.unwrap_or(10.0),
+                                wander_speed: args.wander_speed.unwrap_or(2.0),
+                                detection_radius: args.detection_radius.unwrap_or(15.0),
+                                melee_stats: if combat_type == CombatType::Melee { attack_stats } else { None },
+                                ranged_stats: if combat_type == CombatType::Ranged { attack_stats } else { None },
+                            };
+
+                            let renderer_state = editor.renderer_state.as_mut().unwrap();
+                            let gpu_resources = editor.gpu_resources.as_ref().unwrap();
+                            let camera = editor.camera.as_ref().unwrap();
+
+                            handle_add_npc(
+                                renderer_state,
+                                &gpu_resources.device,
+                                &gpu_resources.queue,
+                                project_id,
+                                args.asset_id.clone(),
+                                component_id.clone(),
+                                asset_file_name,
+                                model_iso,
+                                model_scale,
+                                camera,
+                                None, // Script state
+                                behavior_config.clone()
+                            ).await;
+
+                            // Update SavedState
+                            if let Some(saved_state) = editor.saved_state.as_mut() {
+                                if let Some(level) = saved_state.levels.as_mut().and_then(|l| l.get_mut(0)) {
+                                    let new_component = ComponentData {
+                                        id: component_id,
+                                        kind: Some(ComponentKind::NPC),
+                                        asset_id: args.asset_id.clone(),
+                                        generic_properties: GenericProperties {
+                                            name: "New NPC".to_string(),
+                                            position: pos,
+                                            rotation: rot,
+                                            scale: scale,
+                                        },
+                                        npc_properties: Some(NPCProperties {
+                                            model_id: args.asset_id,
+                                            behavior: behavior_config,
+                                        }),
+                                        ..Default::default()
+                                    };
+                                    
+                                    if let Some(components) = level.components.as_mut() {
+                                        components.push(new_component);
+                                    } else {
+                                        level.components = Some(vec![new_component]);
+                                    }
+                                }
+                                saved_state_clone = Some(saved_state.clone());
+                            }
+                        } else {
+                            log!("Asset not found for NPC: {}", args.asset_id);
                         }
                     }
                 }
