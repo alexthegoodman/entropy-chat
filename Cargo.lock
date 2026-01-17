@@ -1328,6 +1328,8 @@ dependencies = [
  "js-sys",
  "leptos",
  "leptos-use",
+ "nalgebra",
+ "nalgebra-glm",
  "phosphor-leptos",
  "serde",
  "serde-wasm-bindgen",

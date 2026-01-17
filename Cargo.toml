@@ -22,3 +22,5 @@ leptos-use = { version = "0.16.3" }
 wasm-timer = "0.2.5"
 gloo-net = "0.6"
 image = "0.25.9"
+nalgebra = { version = "0.32.5", features = ["mint"] }
+nalgebra-glm = "0.18.0"

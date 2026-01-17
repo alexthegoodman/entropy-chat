@@ -1,7 +1,7 @@
 use entropy_engine::core::pipeline::ExportPipeline;
 use entropy_engine::core::editor::WindowSize;
 use entropy_engine::helpers::load_project::place_project;
-use entropy_engine::helpers::saved_data::{ComponentData, SavedState};
+use entropy_engine::helpers::saved_data::{ComponentData, SavedState, ComponentKind, CollectableType, GenericProperties, CollectableProperties, LightProperties};
 use entropy_engine::helpers::timelines::SavedTimelineStateConfig;
 use js_sys::Date;
 use leptos::html::Canvas;
@@ -20,7 +20,7 @@ use leptos::logging::log;
 use wasm_bindgen_futures::spawn_local as wasm_spawn_local;
 use entropy_engine::helpers::load_project::load_project;
 use leptos::web_sys;
-use entropy_engine::handlers::{EntropyPosition, handle_key_press, handle_mouse_move, handle_mouse_move_on_shift};
+use entropy_engine::handlers::{EntropyPosition, handle_key_press, handle_mouse_move, handle_mouse_move_on_shift, handle_add_model, handle_add_collectable};
 use entropy_engine::water_plane::config::WaterConfig;
 use entropy_engine::procedural_grass::grass::GrassConfig;
 use entropy_engine::shape_primitives::{Cube::Cube, Sphere::Sphere};
@@ -29,6 +29,7 @@ use entropy_engine::helpers::landscapes::generate_landscape_data;
 use std::time::{Duration, SystemTime};
 use gloo_net::http::Request;
 use web_sys::FormData;
+use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector3};
 
 use crate::components::component_browser::ComponentPropertiesEditor;
 
@@ -206,6 +207,33 @@ async fn execute_tool_call(
         trunk_radius: Option<f32>,
         branch_levels: Option<u32>,
         foliage_radius: Option<f32>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct SpawnModelArgs {
+        #[serde(rename = "assetId")]
+        asset_id: String,
+        position: Option<[f32; 3]>,
+        rotation: Option<[f32; 3]>,
+        scale: Option<[f32; 3]>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct SpawnPointLightArgs {
+        position: [f32; 3],
+        color: Option<[f32; 3]>,
+        intensity: Option<f32>,
+        radius: Option<f32>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct SpawnCollectableArgs {
+        #[serde(rename = "assetId")]
+        asset_id: String,
+        r#type: String, // "Item", "MeleeWeapon", etc.
+        position: Option<[f32; 3]>,
+        rotation: Option<[f32; 3]>,
+        scale: Option<[f32; 3]>,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -484,40 +512,251 @@ async fn execute_tool_call(
                 }
             }
         }
-    } else if tool_call.function.name == "configureGrass" {
-        log!("Configuring grass...");
-        let args: Result<ConfigureGrassArgs, _> = serde_json::from_str(&tool_call.function.arguments);
+    } else if tool_call.function.name == "spawnModel" {
+        log!("Spawning model...");
+        let args: Result<SpawnModelArgs, _> = serde_json::from_str(&tool_call.function.arguments);
         if let Ok(args) = args {
-             if let Some(pipeline_arc_val) = pipeline_store.get() {
+            if let Some(pipeline_arc_val) = pipeline_store.get() {
                 if let Some(pipeline_arc) = pipeline_arc_val.as_ref() {
                     let mut pipeline = pipeline_arc.borrow_mut();
                     if let Some(editor) = pipeline.export_editor.as_mut() {
-                        if let Some(renderer_state) = editor.renderer_state.as_mut() {
-                            if let Some(grass) = renderer_state.grasses.get_mut(0) {
-                                let mut current_config = grass.config;
-
-                                if let Some(val) = args.wind_strength { current_config.wind_strength = val; }
-                                if let Some(val) = args.wind_speed { current_config.wind_speed = val; }
-                                if let Some(val) = args.blade_height { current_config.blade_height = val; }
-                                if let Some(val) = args.blade_width { current_config.blade_width = val; }
-                                if let Some(val) = args.blade_density { current_config.blade_density = val; }
-                                if let Some(val) = args.render_distance { current_config.render_distance = val; }
-
-                                grass.update_config(&editor.gpu_resources.as_ref().expect("Couldn't get gpu resources").queue, current_config);
-                                log!("Grass configured {:?}", grass.config);
-                                
-                                // Trigger save if needed
-                                if let Some(saved_state) = editor.saved_state.as_mut() {
-                                    saved_state_clone = Some(saved_state.clone());
-                                }
+                        // let project_id = editor.project_id.clone();
+                        let project_id = selected_project.get().as_ref().expect("Couldn't get selected project").id.clone();
+                        let mut asset_file_name = String::new();
+                        
+                        // Find asset filename in SavedState
+                        if let Some(saved_state) = editor.saved_state.as_ref() {
+                            if let Some(model) = saved_state.models.iter().find(|m| m.id == args.asset_id) {
+                                asset_file_name = model.fileName.clone();
                             }
+                        }
+
+                        if !asset_file_name.is_empty() {
+                            let component_id = Uuid::new_v4().to_string();
+                            let pos = args.position.unwrap_or([0.0, 0.0, 0.0]);
+                            let rot = args.rotation.unwrap_or([0.0, 0.0, 0.0]);
+                            let scale = args.scale.unwrap_or([1.0, 1.0, 1.0]);
+
+                            let model_position = Translation3::new(pos[0], pos[1], pos[2]);
+                            let model_rotation = UnitQuaternion::from_euler_angles(
+                                rot[0].to_radians(), rot[1].to_radians(), rot[2].to_radians()
+                            );
+                            let model_iso = Isometry3::from_parts(model_position, model_rotation);
+                            let model_scale = Vector3::new(scale[0], scale[1], scale[2]);
+
+                            let renderer_state = editor.renderer_state.as_mut().unwrap();
+                            let gpu_resources = editor.gpu_resources.as_ref().unwrap();
+                            let camera = editor.camera.as_ref().unwrap();
+
+                            handle_add_model(
+                                renderer_state,
+                                &gpu_resources.device,
+                                &gpu_resources.queue,
+                                project_id,
+                                args.asset_id.clone(),
+                                component_id.clone(),
+                                asset_file_name,
+                                model_iso,
+                                model_scale,
+                                camera,
+                                None // Script state
+                            ).await;
+
+                            // Update SavedState
+                            if let Some(saved_state) = editor.saved_state.as_mut() {
+                                if let Some(level) = saved_state.levels.as_mut().and_then(|l| l.get_mut(0)) {
+                                    let new_component = ComponentData {
+                                        id: component_id,
+                                        kind: Some(ComponentKind::Model),
+                                        asset_id: args.asset_id,
+                                        generic_properties: GenericProperties {
+                                            name: "New Model".to_string(),
+                                            position: pos,
+                                            rotation: rot,
+                                            scale: scale,
+                                        },
+                                        ..Default::default()
+                                    };
+                                    
+                                    if let Some(components) = level.components.as_mut() {
+                                        components.push(new_component);
+                                    } else {
+                                        level.components = Some(vec![new_component]);
+                                    }
+                                }
+                                saved_state_clone = Some(saved_state.clone());
+                            }
+                        } else {
+                            log!("Asset not found: {}", args.asset_id);
                         }
                     }
                 }
             }
         }
-    } else if tool_call.function.name == "spawnPrimitive" {
-        log!("Spawning primitive...");
+    } else if tool_call.function.name == "spawnPointLight" {
+        log!("Spawning point light...");
+        let args: Result<SpawnPointLightArgs, _> = serde_json::from_str(&tool_call.function.arguments);
+        if let Ok(args) = args {
+            if let Some(pipeline_arc_val) = pipeline_store.get() {
+                if let Some(pipeline_arc) = pipeline_arc_val.as_ref() {
+                    let mut pipeline = pipeline_arc.borrow_mut();
+                    if let Some(editor) = pipeline.export_editor.as_mut() {
+                        let component_id = Uuid::new_v4().to_string();
+                        let color = args.color.unwrap_or([1.0, 1.0, 1.0]);
+                        let intensity = args.intensity.unwrap_or(1.0);
+                        let radius = args.radius.unwrap_or(10.0);
+
+                        // Update RendererState
+                        if let Some(renderer_state) = editor.renderer_state.as_mut() {
+                            renderer_state.point_lights.push(entropy_engine::core::editor::PointLight {
+                                position: args.position,
+                                _padding1: 0,
+                                color,
+                                _padding2: 0,
+                                intensity,
+                                max_distance: radius, // Using radius as max_distance
+                                _padding3: [0; 2],
+                            });
+                        }
+
+                        // Update SavedState
+                        if let Some(saved_state) = editor.saved_state.as_mut() {
+                            if let Some(level) = saved_state.levels.as_mut().and_then(|l| l.get_mut(0)) {
+                                let new_component = ComponentData {
+                                    id: component_id,
+                                    kind: Some(ComponentKind::PointLight),
+                                    asset_id: "".to_string(),
+                                    generic_properties: GenericProperties {
+                                        name: "New Light".to_string(),
+                                        position: args.position,
+                                        ..Default::default()
+                                    },
+                                    light_properties: Some(LightProperties {
+                                        color: [color[0], color[1], color[2], 1.0],
+                                        intensity,
+                                    }),
+                                    ..Default::default()
+                                };
+                                
+                                if let Some(components) = level.components.as_mut() {
+                                    components.push(new_component);
+                                } else {
+                                    level.components = Some(vec![new_component]);
+                                }
+                            }
+                            saved_state_clone = Some(saved_state.clone());
+                        }
+                    }
+                }
+            }
+        }
+    } else if tool_call.function.name == "spawnCollectable" {
+        log!("Spawning collectable...");
+        let args: Result<SpawnCollectableArgs, _> = serde_json::from_str(&tool_call.function.arguments);
+        if let Ok(args) = args {
+            if let Some(pipeline_arc_val) = pipeline_store.get() {
+                if let Some(pipeline_arc) = pipeline_arc_val.as_ref() {
+                    let mut pipeline = pipeline_arc.borrow_mut();
+                    if let Some(editor) = pipeline.export_editor.as_mut() {
+                        // let project_id = editor.project_id.clone();
+                        let project_id = selected_project.get().as_ref().expect("Couldn't get selected project").id.clone();
+                        let mut asset_file_name = String::new();
+                        let mut stat_data = None;
+
+                        // Find asset and default stat in SavedState
+                        if let Some(saved_state) = editor.saved_state.as_ref() {
+                            if let Some(model) = saved_state.models.iter().find(|m| m.id == args.asset_id) {
+                                asset_file_name = model.fileName.clone();
+                            }
+                            if let Some(stats) = &saved_state.stats {
+                                if !stats.is_empty() {
+                                    stat_data = Some(stats[0].clone()); // Pick first stat for now
+                                }
+                            }
+                        }
+
+                        if !asset_file_name.is_empty() && stat_data.is_some() {
+                            let component_id = Uuid::new_v4().to_string();
+                            let pos = args.position.unwrap_or([0.0, 0.0, 0.0]);
+                            let rot = args.rotation.unwrap_or([0.0, 0.0, 0.0]);
+                            let scale = args.scale.unwrap_or([1.0, 1.0, 1.0]);
+
+                            let model_position = Translation3::new(pos[0], pos[1], pos[2]);
+                            let model_rotation = UnitQuaternion::from_euler_angles(
+                                rot[0].to_radians(), rot[1].to_radians(), rot[2].to_radians()
+                            );
+                            let model_iso = Isometry3::from_parts(model_position, model_rotation);
+                            let model_scale = Vector3::new(scale[0], scale[1], scale[2]);
+
+                            let collectable_type = match args.r#type.as_str() {
+                                "MeleeWeapon" => CollectableType::MeleeWeapon,
+                                "RangedWeapon" => CollectableType::RangedWeapon,
+                                "Armor" => CollectableType::Armor,
+                                _ => CollectableType::Item,
+                            };
+
+                            let related_stat = stat_data.unwrap(); // Verified safe above
+
+                            let collectable_properties = CollectableProperties {
+                                model_id: Some(component_id.clone()), // Use same ID for model part
+                                collectable_type: Some(collectable_type.clone()),
+                                stat_id: Some(related_stat.id.clone()),
+                            };
+
+                            let renderer_state = editor.renderer_state.as_mut().unwrap();
+                            let gpu_resources = editor.gpu_resources.as_ref().unwrap();
+                            let camera = editor.camera.as_ref().unwrap();
+
+                            handle_add_collectable(
+                                renderer_state,
+                                &gpu_resources.device,
+                                &gpu_resources.queue,
+                                project_id,
+                                args.asset_id.clone(),
+                                component_id.clone(),
+                                asset_file_name,
+                                model_iso,
+                                model_scale,
+                                camera,
+                                &collectable_properties,
+                                &related_stat,
+                                false, // Don't hide
+                                None // Script state
+                            ).await;
+
+                            // Update SavedState
+                            if let Some(saved_state) = editor.saved_state.as_mut() {
+                                if let Some(level) = saved_state.levels.as_mut().and_then(|l| l.get_mut(0)) {
+                                    let new_component = ComponentData {
+                                        id: component_id,
+                                        kind: Some(ComponentKind::Collectable),
+                                        asset_id: args.asset_id,
+                                        generic_properties: GenericProperties {
+                                            name: "New Collectable".to_string(),
+                                            position: pos,
+                                            rotation: rot,
+                                            scale: scale,
+                                        },
+                                        collectable_properties: Some(collectable_properties),
+                                        ..Default::default()
+                                    };
+                                    
+                                    if let Some(components) = level.components.as_mut() {
+                                        components.push(new_component);
+                                    } else {
+                                        level.components = Some(vec![new_component]);
+                                    }
+                                }
+                                saved_state_clone = Some(saved_state.clone());
+                            }
+                        } else {
+                            log!("Asset or Stats not found for collectable. AssetId: {}", args.asset_id);
+                        }
+                    }
+                }
+            }
+        }
+    } else if tool_call.function.name == "configureGrass" {        log!("Spawning primitive...");
         let args: Result<SpawnPrimitiveArgs, _> = serde_json::from_str(&tool_call.function.arguments);
         if let Ok(args) = args {
             if let Some(pipeline_arc_val) = pipeline_store.get() {
