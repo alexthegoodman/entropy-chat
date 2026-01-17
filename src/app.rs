@@ -33,6 +33,7 @@ use web_sys::FormData;
 use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector3};
 
 use crate::components::component_browser::ComponentPropertiesEditor;
+use crate::components::assets_browser::AssetsBrowser;
 
 fn get_api_url() -> String {
     let window = web_sys::window().unwrap();
@@ -1535,6 +1536,7 @@ pub fn App() -> impl IntoView {
     let (is_initialized, set_is_initialized) = signal(false);
     let (message_content, set_message_content) = signal(String::new());
     let (local_messages, set_local_messages) = signal(Vec::<ChatMessage>::new());
+    let (active_editor_tab, set_active_editor_tab) = signal(0);
     let input_ref: NodeRef<leptos::html::Input> = NodeRef::new();
 
     // DO NOT use "create_resource" as the leptos_reactive crate is deprecated, LocalResource is the recommended way for a client-side Tauri + Leptos app
@@ -1847,10 +1849,31 @@ pub fn App() -> impl IntoView {
                         is_initialized={is_initialized}
                         set_is_initialized={set_is_initialized} 
                     />
-                    <ComponentPropertiesEditor
-                        pipeline_store={pipeline_store}
-                        is_initialized={is_initialized}
-                    />
+                    
+                    <div class="editor-tabs">
+                         <button 
+                            class:active=move || active_editor_tab.get() == 0
+                            on:click=move |_| set_active_editor_tab.set(0)
+                        >{"Components"}</button>
+                        <button 
+                            class:active=move || active_editor_tab.get() == 1
+                            on:click=move |_| set_active_editor_tab.set(1)
+                        >{"Assets"}</button>
+                    </div>
+
+                    <Show when=move || active_editor_tab.get() == 0>
+                        <ComponentPropertiesEditor
+                            pipeline_store={pipeline_store}
+                            is_initialized={is_initialized}
+                        />
+                    </Show>
+                    
+                    <Show when=move || active_editor_tab.get() == 1>
+                        <AssetsBrowser
+                            pipeline_store={pipeline_store}
+                            is_initialized={is_initialized}
+                        />
+                    </Show>
                 </div>
             </section>
             </Show>
