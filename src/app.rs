@@ -35,7 +35,7 @@ use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector3};
 use crate::components::component_browser::ComponentPropertiesEditor;
 use crate::components::assets_browser::AssetsBrowser;
 
-fn get_api_url() -> String {
+pub fn get_api_url() -> String {
     let window = web_sys::window().unwrap();
     let location = window.location();
     let hostname = location.hostname().unwrap_or_default();
@@ -1872,6 +1872,8 @@ pub fn App() -> impl IntoView {
                         <AssetsBrowser
                             pipeline_store={pipeline_store}
                             is_initialized={is_initialized}
+                            project_path=Signal::derive(move || selected_project.get().map(|p| p.path))
+                            project_id=Signal::derive(move || selected_project.get().map(|p| p.id))
                         />
                     </Show>
                 </div>
