@@ -358,7 +358,15 @@ async fn execute_tool_call(
                                      let camera_binding = editor.camera_binding.as_ref().unwrap(); 
                                      let surface_format = wgpu::TextureFormat::Rgba8Unorm; // Matching ProjectCanvas
                                      
-                                     handle_add_water_plane(renderer_state, device, &camera_binding.bind_group_layout, surface_format, landscape_id.clone());
+                                     handle_add_water_plane(
+                                        renderer_state, 
+                                        device, 
+                                        &camera_binding.bind_group_layout, 
+                                        surface_format, 
+                                        landscape_id.clone(), 
+                                        Some(WaterConfig::default()), 
+                                        Some(landscape_id.clone())
+                                    );
                                      log!("Water plane created for landscape {}", landscape_id);
                                 }
                             }
